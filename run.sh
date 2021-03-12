@@ -1,7 +1,9 @@
 #!/bin/sh
 
+trap 'kill -- -$$' INT 
+
 BINARY_LOCATION=./target/release/tcp
-cargo build --release
+cargo build --release || exit 1
 sudo setcap cap_net_admin=eip $BINARY_LOCATION
 ./$BINARY_LOCATION &
 PID=$!
