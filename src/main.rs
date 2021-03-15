@@ -1,39 +1,20 @@
 extern crate etherparse;
 extern crate tun_tap;
 
+mod packet;
+mod state;
+
+use std::collections::HashMap;
 use std::io;
+
 use tun_tap::{Iface, Mode};
 
-struct Packet {
-    bytes: [u8; 1504],
-}
-
-impl Packet {
-    fn new(bytes: [u8; 1504]) -> Self {
-        return Self { bytes };
-    }
-
-    fn protocol(&self) -> Protocol {
-        let proto_bytes = self.protocol_bytes();
-
-        match proto_bytes {
-            0x0800 => Protocol::Ipv4,
-            _ => Protocol::Other,
-        }
-    }
-
-    fn protocol_bytes(&self) -> u16 {
-        u16::from_be_bytes([self.bytes[2], self.bytes[3]])
-    }
-}
-
-#[derive(PartialEq)]
-enum Protocol {
-    Ipv4,
-    Other,
-}
+use crate::packet::{Packet, Protocol};
+use crate::state::{Connection, TcpState};
 
 fn main() -> io::Result<()> {
+    let mut connections: HashMap<Connection, TcpState> = Default::default();
+
     let nic = Iface::new("tun0", Mode::Tun).expect("Failed to create tunnel");
     let mut buf = [0u8; 1504];
 
@@ -42,7 +23,7 @@ fn main() -> io::Result<()> {
         let packet = Packet::new(buf);
 
         match packet.protocol() {
-            Protocol::Ipv4 => handle_ip_packet(packet),
+            Protocol::Ipv4 => handle_ip_packet(&mut connections, packet),
             Protocol::Other => {
                 println!("ignoring non-ipv4 packet");
                 continue;
@@ -52,32 +33,38 @@ fn main() -> io::Result<()> {
     Result::Ok(())
 }
 
-fn handle_ip_packet(packet: Packet) {
+fn handle_ip_packet(state: &mut HashMap<Connection, TcpState>, packet: Packet) {
     let buf = packet.bytes;
-    let bytes_read = packet.bytes.len();
+    let buffer_length = packet.bytes.len();
 
-    match etherparse::Ipv4HeaderSlice::from_slice(&buf[4..bytes_read]) {
-        Ok(p) => {
-            let src = p.source_addr();
-            let dest = p.destination_addr();
-            let proto = p.protocol();
-
+    match etherparse::Ipv4HeaderSlice::from_slice(&buf[4..buffer_length]) {
+        Ok(ip_headers) => {
             // if not TCP
-            if proto != 0x06 {
+            if ip_headers.protocol() != 0x06 {
                 eprintln!("ignoring non-tcp packet");
                 return;
             }
 
-            let start_of_tcp_headers = 4 + p.slice().len();
+            let start_of_tcp_headers = 4 + ip_headers.slice().len();
             match etherparse::TcpHeaderSlice::from_slice(&buf[start_of_tcp_headers..]) {
                 Ok(tcp_headers) => {
-                    eprintln!("{} - {} {}byte(s) of TCP to port {}", src, dest, tcp_headers.slice().len(), tcp_headers.destination_port());
+                    let start_of_tcp_packet = start_of_tcp_headers + tcp_headers.slice().len();
+                    state
+                        .entry(Connection {
+                            source: (ip_headers.source_addr(), tcp_headers.source_port()),
+                            destination: (
+                                ip_headers.destination_addr(),
+                                tcp_headers.destination_port(),
+                            ),
+                        })
+                        .or_default()
+                        .on_packet(ip_headers, tcp_headers, &buf[start_of_tcp_packet..])
                 }
-                Err(e) => eprintln!("Dodgy TCP header packet, {:?}", e),
+                Err(e) => {
+                    eprintln!("Dodgy TCP header packet, {:?}", e)
+                }
             }
         }
-        Err(e) => {
-            eprintln!("Dodgy packet ignored, {:?}", e);
-        }
+        Err(e) => eprintln!("Dodgy packet ignored, {:?}", e),
     }
 }
