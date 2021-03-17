@@ -1,10 +1,11 @@
 pub struct Packet {
     pub bytes: [u8; 1504],
+    pub length: usize,
 }
 
 impl Packet {
-    pub fn new(bytes: [u8; 1504]) -> Self {
-        return Self { bytes };
+    pub fn new(bytes: [u8; 1504], length: usize) -> Self {
+        return Self { bytes, length };
     }
 
     pub fn protocol(&self) -> Protocol {
